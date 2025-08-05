@@ -138,20 +138,28 @@
 //        }
 //    }
 //}
-
-
 using UnityEngine;
 using UnityEngine.UI;
 using System.IO;
 using System.Collections.Generic;
 using UnityEngine.EventSystems;
+using System.Linq;
 
 public class TileLoader : MonoBehaviour, IDragHandler, IBeginDragHandler
 {
+    [Header("Map & Tiles")]
     public RectTransform mapContainer;
     public GameObject tilePrefab;
     public int minZoom = 5, maxZoom = 10, currentZoom = 5;
     public int tileSize = 256;
+
+    [Header("Clamp Settings per Zoom Level")]
+    public ZoomClamp[] clampSettings = new ZoomClamp[6]
+    {
+        new ZoomClamp(5), new ZoomClamp(6),
+        new ZoomClamp(7), new ZoomClamp(8),
+        new ZoomClamp(9), new ZoomClamp(10)
+    };
 
     private Dictionary<Vector2Int, GameObject> loadedTiles = new();
     private Vector2 dragStart;
@@ -159,19 +167,19 @@ public class TileLoader : MonoBehaviour, IDragHandler, IBeginDragHandler
 
     void Start()
     {
-        // Center pivot/anchors for center-based zoom
-        mapContainer.pivot = new Vector2(0.5f, 0.5f);
-        mapContainer.anchorMin = mapContainer.anchorMax = new Vector2(0.5f, 0.5f);
+        // center‐based zoom
+        mapContainer.pivot = mapContainer.anchorMin = mapContainer.anchorMax
+                            = new Vector2(0.5f, 0.5f);
+
         originalAnchoredPosition = mapContainer.anchoredPosition;
         LoadTiles(currentZoom);
+        ClampMap();
     }
 
     void Update()
     {
         if (Input.mouseScrollDelta.y != 0)
-        {
             Zoom(Input.mouseScrollDelta.y > 0);
-        }
     }
 
     public void Zoom(bool zoomIn)
@@ -179,25 +187,33 @@ public class TileLoader : MonoBehaviour, IDragHandler, IBeginDragHandler
         int prev = currentZoom;
         currentZoom = Mathf.Clamp(currentZoom + (zoomIn ? 1 : -1), minZoom, maxZoom);
         if (currentZoom == prev) return;
+
         ReloadTiles(currentZoom);
+        ClampMap();
     }
 
     void ReloadTiles(int zoom)
     {
-        foreach (Transform child in mapContainer)
-            if (child.name != "PinsContainer") Destroy(child.gameObject);
+        // remove old tiles
+        foreach (Transform c in mapContainer)
+            if (c.name != "PinsContainer")
+                Destroy(c.gameObject);
         loadedTiles.Clear();
-        // Do not reset mapContainer.anchoredPosition—keep center
+
         LoadTiles(zoom);
     }
 
     void LoadTiles(int z)
     {
-        string zoomFolder = Path.Combine(Application.streamingAssetsPath, "Map Tiles", z.ToString());
-        if (!Directory.Exists(zoomFolder)) { Debug.LogError("Zoom folder not found: " + zoomFolder); return; }
+        string folder = Path.Combine(Application.streamingAssetsPath, "Map Tiles", z.ToString());
+        if (!Directory.Exists(folder))
+        {
+            Debug.LogError("Zoom folder not found: " + folder);
+            return;
+        }
 
         var infos = new List<(int x, int y, string path)>();
-        foreach (var xDir in Directory.GetDirectories(zoomFolder))
+        foreach (var xDir in Directory.GetDirectories(folder))
         {
             if (!int.TryParse(Path.GetFileName(xDir), out int x)) continue;
             foreach (var img in Directory.GetFiles(xDir, "*.png"))
@@ -208,21 +224,18 @@ public class TileLoader : MonoBehaviour, IDragHandler, IBeginDragHandler
         }
         if (infos.Count == 0) return;
 
-        int minX = int.MaxValue, maxX = int.MinValue, minY = int.MaxValue, maxY = int.MinValue;
-        foreach (var (x, y, _) in infos)
-        {
-            minX = Mathf.Min(minX, x); maxX = Mathf.Max(maxX, x);
-            minY = Mathf.Min(minY, y); maxY = Mathf.Max(maxY, y);
-        }
+        int minX = infos.Min(t => t.x), maxX = infos.Max(t => t.x);
+        int minY = infos.Min(t => t.y), maxY = infos.Max(t => t.y);
 
-        int w = (maxX - minX + 1) * tileSize, h = (maxY - minY + 1) * tileSize;
+        int w = (maxX - minX + 1) * tileSize;
+        int h = (maxY - minY + 1) * tileSize;
         mapContainer.sizeDelta = new Vector2(w, h);
 
         foreach (var (x, y, path) in infos)
         {
             var tile = Instantiate(tilePrefab, mapContainer);
             tile.name = $"Tile_{x}_{y}";
-            var data = File.ReadAllBytes(path);
+            byte[] data = File.ReadAllBytes(path);
             var tex = new Texture2D(2, 2);
             tex.LoadImage(data);
             tile.GetComponent<RawImage>().texture = tex;
@@ -241,13 +254,47 @@ public class TileLoader : MonoBehaviour, IDragHandler, IBeginDragHandler
     {
         dragStart = e.position;
     }
+
     public void OnDrag(PointerEventData e)
     {
         if (e.button == PointerEventData.InputButton.Left)
         {
-            var delta = e.position - dragStart;
+            Vector2 delta = e.position - dragStart;
             dragStart = e.position;
             mapContainer.anchoredPosition += delta;
+            ClampMap();
+        }
+    }
+
+    public void ClampMap()
+    {
+        // find settings for current zoom
+        var s = clampSettings.FirstOrDefault(c => c.zoomLevel == currentZoom);
+        if (s.zoomLevel != currentZoom) return; // not found
+
+        Vector2 pos = mapContainer.anchoredPosition;
+
+        if (s.clampX)
+            pos.x = Mathf.Clamp(pos.x, s.minX, s.maxX);
+        if (s.clampY)
+            pos.y = Mathf.Clamp(pos.y, s.minY, s.maxY);
+
+        mapContainer.anchoredPosition = pos;
+    }
+
+    [System.Serializable]
+    public struct ZoomClamp
+    {
+        [Tooltip("Zoom level this applies to")]
+        public int zoomLevel;
+        public bool clampX, clampY;
+        public float minX, maxX, minY, maxY;
+
+        public ZoomClamp(int z)
+        {
+            zoomLevel = z;
+            clampX = clampY = false;
+            minX = maxX = minY = maxY = 0;
         }
     }
 }
